@@ -1,0 +1,1396 @@
+diff --git a/crates/avian3d/Cargo.toml b/crates/avian3d/Cargo.toml
+index 3edccbb..147598b 100644
+--- a/crates/avian3d/Cargo.toml
++++ b/crates/avian3d/Cargo.toml
+@@ -169,6 +169,10 @@ required-features = ["3d", "default-collider", "debug-plugin"]
+ name = "fixed_joint_3d"
+ required-features = ["3d", "default-collider"]
+ 
++[[example]]
++name = "six_dof_joint_3d"
++required-features = ["3d", "default-collider", "debug-plugin"]
++
+ [[example]]
+ name = "prismatic_joint_3d"
+ required-features = ["3d", "default-collider"]
+diff --git a/crates/avian3d/examples/six_dof_joint_3d.rs b/crates/avian3d/examples/six_dof_joint_3d.rs
+new file mode 100644
+index 0000000..e2f5eed
+--- /dev/null
++++ b/crates/avian3d/examples/six_dof_joint_3d.rs
+@@ -0,0 +1,183 @@
++//! An example demonstrating the [`SixDofJoint`] with various configurations.
++//!
++//! The scene shows four joints:
++//! 1. All axes locked (equivalent to a FixedJoint) — top left
++//! 2. Swing and twist free (equivalent to a SphericalJoint) — top right
++//! 3. Limited twist, locked swing (like a RevoluteJoint with limits) — bottom left
++//! 4. Linear Y free, others locked (like a PrismaticJoint along Y) — bottom right
++
++use avian3d::{math::*, prelude::*};
++use bevy::prelude::*;
++use examples_common_3d::ExampleCommonPlugin;
++
++fn main() {
++    App::new()
++        .add_plugins((
++            DefaultPlugins,
++            ExampleCommonPlugin,
++            PhysicsPlugins::default(),
++            PhysicsDebugPlugin,
++        ))
++        .insert_resource(SubstepCount(50))
++        .add_systems(Startup, setup)
++        .run();
++}
++
++fn setup(
++    mut commands: Commands,
++    mut meshes: ResMut<Assets<Mesh>>,
++    mut materials: ResMut<Assets<StandardMaterial>>,
++) {
++    let cube_mesh = meshes.add(Cuboid::default());
++    let sphere_mesh = meshes.add(Sphere::new(0.5));
++
++    let anchor_material = materials.add(Color::srgb(0.6, 0.6, 0.7));
++    let dynamic_material = materials.add(Color::srgb(0.8, 0.5, 0.3));
++    let limited_material = materials.add(Color::srgb(0.3, 0.8, 0.5));
++    let prismatic_material = materials.add(Color::srgb(0.3, 0.5, 0.8));
++
++    let spacing = 4.0;
++
++    // --- 1. All Locked (like FixedJoint) — top left ---
++    {
++        let pos = Vector::new(-spacing, spacing, 0.0);
++
++        let anchor = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(anchor_material.clone()),
++                Transform::from_translation(pos.f32()),
++                RigidBody::Kinematic,
++                AngularVelocity(Vector::Z * 1.5),
++            ))
++            .id();
++
++        let body = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(dynamic_material.clone()),
++                Transform::from_translation((pos + Vector::X * 2.0).f32()),
++                RigidBody::Dynamic,
++                MassPropertiesBundle::from_shape(&Cuboid::from_length(1.0), 1.0),
++            ))
++            .id();
++
++        // All locked = FixedJoint equivalent
++        commands.spawn(
++            SixDofJoint::new(anchor, body).with_local_anchor1(Vector::X * 2.0),
++        );
++    }
++
++    // --- 2. Angular Free (like SphericalJoint) — top right ---
++    {
++        let pos = Vector::new(spacing, spacing, 0.0);
++
++        let anchor = commands
++            .spawn((
++                Mesh3d(sphere_mesh.clone()),
++                MeshMaterial3d(anchor_material.clone()),
++                Transform::from_translation(pos.f32()),
++                RigidBody::Static,
++            ))
++            .id();
++
++        let body = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(dynamic_material.clone()),
++                Transform::from_translation((pos + Vector::new(-1.5, -1.5, 0.0)).f32()),
++                RigidBody::Dynamic,
++                MassPropertiesBundle::from_shape(&Cuboid::from_length(1.0), 1.0),
++            ))
++            .id();
++
++        // All linear locked, angular free = SphericalJoint equivalent.
++        // Body starts offset to the side so gravity makes it swing like a pendulum.
++        commands.spawn(
++            SixDofJoint::new(anchor, body)
++                .with_anchor((pos + Vector::new(0.0, 0.5, 0.0)).f32().into())
++                .with_twist(JointAxisMotion::Free)
++                .with_swing(JointAxisMotion::Free),
++        );
++    }
++
++    // --- 3. Limited Twist, Locked Swing (like limited RevoluteJoint) — bottom left ---
++    {
++        let pos = Vector::new(-spacing, -spacing, 0.0);
++
++        let anchor = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(anchor_material.clone()),
++                Transform::from_translation(pos.f32()),
++                RigidBody::Static,
++            ))
++            .id();
++
++        let body = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(limited_material.clone()),
++                Transform::from_translation((pos + Vector::new(2.0, 0.0, 0.0)).f32()),
++                RigidBody::Dynamic,
++                MassPropertiesBundle::from_shape(&Cuboid::from_length(1.0), 1.0),
++                AngularVelocity(Vector::Y * 3.0),
++            ))
++            .id();
++
++        // Locked swing + limited twist = RevoluteJoint with angle limits.
++        // Body starts with angular velocity to show the twist bouncing off the ±45° limits.
++        commands.spawn(
++            SixDofJoint::new(anchor, body)
++                .with_local_anchor1(Vector::X * 2.0)
++                .with_twist_limits(-PI / 4.0, PI / 4.0),
++        );
++    }
++
++    // --- 4. Linear Y Free (like PrismaticJoint along Y) — bottom right ---
++    {
++        let pos = Vector::new(spacing, -spacing, 0.0);
++
++        let anchor = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(anchor_material.clone()),
++                Transform::from_translation(pos.f32()),
++                RigidBody::Static,
++            ))
++            .id();
++
++        let body = commands
++            .spawn((
++                Mesh3d(cube_mesh.clone()),
++                MeshMaterial3d(prismatic_material),
++                Transform::from_translation((pos + Vector::new(0.0, -1.5, 0.0)).f32()),
++                RigidBody::Dynamic,
++                MassPropertiesBundle::from_shape(&Cuboid::from_length(1.0), 1.0),
++            ))
++            .id();
++
++        // Only Y translation is free; all angular + X/Z translation locked
++        commands.spawn(
++            SixDofJoint::new(anchor, body)
++                .with_linear_y(JointAxisMotion::Limited)
++                .with_linear_y_limits(-3.0, 0.0),
++        );
++    }
++
++    // Light
++    commands.spawn((
++        DirectionalLight {
++            illuminance: 2000.0,
++            shadows_enabled: true,
++            ..default()
++        },
++        Transform::default().looking_at(Vec3::new(-1.0, -2.5, -1.5), Vec3::Y),
++    ));
++
++    // Camera
++    commands.spawn((
++        Camera3d::default(),
++        Transform::from_xyz(0.0, 0.0, 18.0).looking_at(Vec3::ZERO, Vec3::Y),
++    ));
++}
+diff --git a/src/debug_render/mod.rs b/src/debug_render/mod.rs
+index f189fc8..661b559 100644
+--- a/src/debug_render/mod.rs
++++ b/src/debug_render/mod.rs
+@@ -123,6 +123,8 @@ impl Plugin for PhysicsDebugPlugin {
+                 debug_render_constraint::<RevoluteJoint, 2>,
+                 #[cfg(feature = "3d")]
+                 debug_render_constraint::<SphericalJoint, 2>,
++                #[cfg(feature = "3d")]
++                debug_render_constraint::<SixDofJoint, 2>,
+                 debug_render_raycasts,
+                 #[cfg(all(
+                     feature = "default-collider",
+diff --git a/src/diagnostics/entity_counters.rs b/src/diagnostics/entity_counters.rs
+index 6030dc3..8098f1b 100644
+--- a/src/diagnostics/entity_counters.rs
++++ b/src/diagnostics/entity_counters.rs
+@@ -67,6 +67,7 @@ fn diagnostic_entity_counts(
+     distance_joint_query: Query<&DistanceJoint>,
+     revolute_joint_query: Query<&RevoluteJoint>,
+     #[cfg(feature = "3d")] spherical_joint_query: Query<&SphericalJoint>,
++    #[cfg(feature = "3d")] six_dof_joint_query: Query<&SixDofJoint>,
+     mut diagnostics: ResMut<PhysicsEntityDiagnostics>,
+ ) {
+     diagnostics.dynamic_body_count = rigid_bodies_query
+@@ -89,5 +90,6 @@ fn diagnostic_entity_counts(
+     #[cfg(feature = "3d")]
+     {
+         diagnostics.joint_count += spherical_joint_query.iter().count() as u32;
++        diagnostics.joint_count += six_dof_joint_query.iter().count() as u32;
+     }
+ }
+diff --git a/src/dynamics/joints/mod.rs b/src/dynamics/joints/mod.rs
+index 036982b..0d5c13c 100644
+--- a/src/dynamics/joints/mod.rs
++++ b/src/dynamics/joints/mod.rs
+@@ -33,6 +33,10 @@ Therefore, they have 3 translational DOF and 3 rotational DOF, a total of 6 DOF.
+     feature = "3d",
+     doc = "| [`SphericalJoint`] | -                         | 3 Rotations                 |"
+ )]
++#![cfg_attr(
++    feature = "3d",
++    doc = "| [`SixDofJoint`]    | -                         | Configurable (0-6 DOF)      |"
++)]
+ //!
+ //! # Using Joints
+ //!
+@@ -218,6 +222,8 @@ mod motor;
+ mod prismatic;
+ mod revolute;
+ #[cfg(feature = "3d")]
++mod six_dof;
++#[cfg(feature = "3d")]
+ mod spherical;
+ #[cfg(test)]
+ mod tests;
+@@ -228,6 +234,8 @@ pub use motor::{AngularMotor, LinearMotor, MotorModel};
+ pub use prismatic::PrismaticJoint;
+ pub use revolute::RevoluteJoint;
+ #[cfg(feature = "3d")]
++pub use six_dof::{JointAxisMotion, SixDofJoint};
++#[cfg(feature = "3d")]
+ pub use spherical::SphericalJoint;
+ 
+ use crate::{dynamics::solver::joint_graph::JointGraph, prelude::*};
+@@ -250,6 +258,8 @@ impl Plugin for JointPlugin {
+             prismatic::plugin,
+             revolute::plugin,
+             #[cfg(feature = "3d")]
++            six_dof::plugin,
++            #[cfg(feature = "3d")]
+             spherical::plugin,
+         ));
+ 
+diff --git a/src/dynamics/joints/six_dof.rs b/src/dynamics/joints/six_dof.rs
+new file mode 100644
+index 0000000..a22d021
+--- /dev/null
++++ b/src/dynamics/joints/six_dof.rs
+@@ -0,0 +1,536 @@
++use crate::{
++    dynamics::joints::{EntityConstraint, JointSystems},
++    prelude::*,
++};
++use bevy::{
++    ecs::{
++        entity::{EntityMapper, MapEntities},
++        reflect::ReflectMapEntities,
++    },
++    prelude::*,
++};
++
++/// Defines the motion behavior of a single degree of freedom in a [`SixDofJoint`].
++///
++/// Each axis of a [`SixDofJoint`] can be independently set to one of these modes
++/// to control what kind of relative motion is allowed between the connected bodies.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Reflect)]
++#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
++#[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
++#[reflect(Debug, PartialEq)]
++pub enum JointAxisMotion {
++    /// The axis is free, allowing unrestricted relative motion.
++    Free,
++    /// The axis is locked, preventing any relative motion.
++    ///
++    /// This is the default, making a [`SixDofJoint`] behave like a [`FixedJoint`] by default.
++    #[default]
++    Locked,
++    /// The axis allows relative motion within the configured limits.
++    Limited,
++}
++
++/// A generic 6 degrees-of-freedom [joint](dynamics::joints) that provides independent
++/// control over each translational and rotational axis.
++///
++/// This is the most flexible joint type, capable of emulating any other joint by configuring
++/// the [`JointAxisMotion`] of each degree of freedom. Each axis can be independently set to
++/// [`Free`](JointAxisMotion::Free), [`Locked`](JointAxisMotion::Locked),
++/// or [`Limited`](JointAxisMotion::Limited).
++///
++/// # Degrees of Freedom
++///
++/// The joint controls 5 groups of degrees of freedom:
++///
++/// - **Linear X, Y, Z**: Translation along the X, Y, and Z axes of the joint frame.
++/// - **Twist**: Rotation about the [`twist_axis`](Self::twist_axis).
++/// - **Swing**: Rotation about axes perpendicular to the twist axis, constrained as a cone.
++///
++/// # Emulating Other Joints
++///
++/// By default, all axes are [`Locked`](JointAxisMotion::Locked), making a `SixDofJoint`
++/// equivalent to a [`FixedJoint`].
++///
++/// - **[`SphericalJoint`]**: Set all linear axes to `Locked`, twist and swing to `Free` or `Limited`.
++/// - **[`RevoluteJoint`]**: Set all linear axes to `Locked`, swing to `Locked`, twist to `Free` or `Limited`.
++/// - **[`PrismaticJoint`]**: Set twist and swing to `Locked`, one linear axis to `Free` or `Limited`.
++///
++/// # Example
++///
++/// ```
++/// # use avian3d::prelude::*;
++/// # use bevy::prelude::*;
++/// # use core::f32::consts::FRAC_PI_4;
++/// #
++/// # #[cfg(feature = "f32")]
++/// # fn setup(mut commands: Commands) {
++/// #     let body1 = commands.spawn(RigidBody::Dynamic).id();
++/// #     let body2 = commands.spawn(RigidBody::Dynamic).id();
++/// #
++/// // Create a joint that allows twist rotation and limited linear X motion.
++/// commands.spawn(
++///     SixDofJoint::new(body1, body2)
++///         .with_twist(JointAxisMotion::Free)
++///         .with_linear_x(JointAxisMotion::Limited)
++///         .with_linear_x_limits(-1.0, 1.0),
++/// );
++/// # }
++/// ```
++#[derive(Component, Clone, Debug, PartialEq, Reflect)]
++#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
++#[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
++#[reflect(Component, Debug, MapEntities, PartialEq)]
++pub struct SixDofJoint {
++    /// The first body constrained by the joint.
++    pub body1: Entity,
++    /// The second body constrained by the joint.
++    pub body2: Entity,
++    /// The reference frame of the first body, defining the joint anchor and basis
++    /// relative to the body transform.
++    pub frame1: JointFrame,
++    /// The reference frame of the second body, defining the joint anchor and basis
++    /// relative to the body transform.
++    pub frame2: JointFrame,
++    /// The local axis about which the bodies can twist relative to each other.
++    ///
++    /// This is also the axis passing through the swing limit cone,
++    /// defining which axes the bodies can swing around.
++    ///
++    /// By default, this is the y-axis.
++    pub twist_axis: Vector,
++
++    // --- Motion modes ---
++    /// The motion mode for translation along the local X axis.
++    pub linear_x: JointAxisMotion,
++    /// The motion mode for translation along the local Y axis.
++    pub linear_y: JointAxisMotion,
++    /// The motion mode for translation along the local Z axis.
++    pub linear_z: JointAxisMotion,
++    /// The motion mode for rotation about the [`twist_axis`](Self::twist_axis).
++    pub twist: JointAxisMotion,
++    /// The motion mode for rotation about axes perpendicular to the [`twist_axis`](Self::twist_axis),
++    /// controlled as a cone.
++    pub swing: JointAxisMotion,
++
++    // --- Limits ---
++    /// The translational limits along the local X axis. Used when [`linear_x`](Self::linear_x) is [`Limited`](JointAxisMotion::Limited).
++    pub linear_x_limit: DistanceLimit,
++    /// The translational limits along the local Y axis. Used when [`linear_y`](Self::linear_y) is [`Limited`](JointAxisMotion::Limited).
++    pub linear_y_limit: DistanceLimit,
++    /// The translational limits along the local Z axis. Used when [`linear_z`](Self::linear_z) is [`Limited`](JointAxisMotion::Limited).
++    pub linear_z_limit: DistanceLimit,
++    /// The angular limits for twist rotation. Used when [`twist`](Self::twist) is [`Limited`](JointAxisMotion::Limited).
++    pub twist_limit: AngleLimit,
++    /// The angular limits for swing rotation (cone half-angle). Used when [`swing`](Self::swing) is [`Limited`](JointAxisMotion::Limited).
++    pub swing_limit: AngleLimit,
++
++    // --- Compliance ---
++    /// The compliance of locked linear constraints (inverse of stiffness, m / N).
++    pub point_compliance: Scalar,
++    /// The compliance of limited linear constraints (inverse of stiffness, m / N).
++    pub linear_limit_compliance: Scalar,
++    /// The compliance of locked angular constraints, i.e. axis alignment (inverse of stiffness, N * m / rad).
++    pub align_compliance: Scalar,
++    /// The compliance for the swing limit (inverse of stiffness, N * m / rad).
++    pub swing_compliance: Scalar,
++    /// The compliance for the twist limit or lock (inverse of stiffness, N * m / rad).
++    pub twist_compliance: Scalar,
++}
++
++impl EntityConstraint<2> for SixDofJoint {
++    fn entities(&self) -> [Entity; 2] {
++        [self.body1, self.body2]
++    }
++}
++
++impl SixDofJoint {
++    /// The default [`twist_axis`](Self::twist_axis) for a six-DOF joint.
++    pub const DEFAULT_TWIST_AXIS: Vector = Vector::Y;
++
++    /// Creates a new [`SixDofJoint`] between two entities.
++    ///
++    /// By default, all axes are [`Locked`](JointAxisMotion::Locked),
++    /// making it equivalent to a [`FixedJoint`].
++    #[inline]
++    pub const fn new(body1: Entity, body2: Entity) -> Self {
++        Self {
++            body1,
++            body2,
++            frame1: JointFrame::IDENTITY,
++            frame2: JointFrame::IDENTITY,
++            twist_axis: Self::DEFAULT_TWIST_AXIS,
++            linear_x: JointAxisMotion::Locked,
++            linear_y: JointAxisMotion::Locked,
++            linear_z: JointAxisMotion::Locked,
++            twist: JointAxisMotion::Locked,
++            swing: JointAxisMotion::Locked,
++            linear_x_limit: DistanceLimit::ZERO,
++            linear_y_limit: DistanceLimit::ZERO,
++            linear_z_limit: DistanceLimit::ZERO,
++            twist_limit: AngleLimit::ZERO,
++            swing_limit: AngleLimit::ZERO,
++            point_compliance: 0.0,
++            linear_limit_compliance: 0.0,
++            align_compliance: 0.0,
++            swing_compliance: 0.0,
++            twist_compliance: 0.0,
++        }
++    }
++
++    /// Sets the [`twist_axis`](Self::twist_axis) about which the bodies can twist relative to each other.
++    ///
++    /// By default, this is the y-axis.
++    #[inline]
++    pub const fn with_twist_axis(mut self, twist_axis: Vector) -> Self {
++        self.twist_axis = twist_axis;
++        self
++    }
++
++    /// Sets the local [`JointFrame`] of the first body, configuring both the [`JointAnchor`] and [`JointBasis`].
++    #[inline]
++    pub fn with_local_frame1(mut self, frame: impl Into<Isometry>) -> Self {
++        self.frame1 = JointFrame::local(frame);
++        self
++    }
++
++    /// Sets the local [`JointFrame`] of the second body, configuring both the [`JointAnchor`] and [`JointBasis`].
++    #[inline]
++    pub fn with_local_frame2(mut self, frame: impl Into<Isometry>) -> Self {
++        self.frame2 = JointFrame::local(frame);
++        self
++    }
++
++    /// Sets the global anchor point on both bodies.
++    ///
++    /// This configures the [`JointAnchor`] of each [`JointFrame`].
++    #[inline]
++    pub const fn with_anchor(mut self, anchor: Vector) -> Self {
++        self.frame1.anchor = JointAnchor::FromGlobal(anchor);
++        self.frame2.anchor = JointAnchor::FromGlobal(anchor);
++        self
++    }
++
++    /// Sets the local anchor point on the first body.
++    ///
++    /// This configures the [`JointAnchor`] of the first [`JointFrame`].
++    #[inline]
++    pub const fn with_local_anchor1(mut self, anchor: Vector) -> Self {
++        self.frame1.anchor = JointAnchor::Local(anchor);
++        self
++    }
++
++    /// Sets the local anchor point on the second body.
++    ///
++    /// This configures the [`JointAnchor`] of the second [`JointFrame`].
++    #[inline]
++    pub const fn with_local_anchor2(mut self, anchor: Vector) -> Self {
++        self.frame2.anchor = JointAnchor::Local(anchor);
++        self
++    }
++
++    /// Sets the global basis for both bodies.
++    ///
++    /// This configures the [`JointBasis`] of each [`JointFrame`].
++    #[inline]
++    pub fn with_basis(mut self, basis: impl Into<Rot>) -> Self {
++        let basis = basis.into();
++        self.frame1.basis = JointBasis::FromGlobal(basis);
++        self.frame2.basis = JointBasis::FromGlobal(basis);
++        self
++    }
++
++    /// Sets the local basis for the first body.
++    ///
++    /// This configures the [`JointBasis`] of the first [`JointFrame`].
++    #[inline]
++    pub fn with_local_basis1(mut self, basis: impl Into<Rot>) -> Self {
++        self.frame1.basis = JointBasis::Local(basis.into());
++        self
++    }
++
++    /// Sets the local basis for the second body.
++    ///
++    /// This configures the [`JointBasis`] of the second [`JointFrame`].
++    #[inline]
++    pub fn with_local_basis2(mut self, basis: impl Into<Rot>) -> Self {
++        self.frame2.basis = JointBasis::Local(basis.into());
++        self
++    }
++
++    /// Returns the local [`JointFrame`] of the first body.
++    ///
++    /// If the [`JointAnchor`] is set to [`FromGlobal`](JointAnchor::FromGlobal),
++    /// and the local anchor has not yet been computed, or the [`JointBasis`] is set to
++    /// [`FromGlobal`](JointBasis::FromGlobal), and the local basis has not yet
++    /// been computed, this will return `None`.
++    #[inline]
++    pub fn local_frame1(&self) -> Option<Isometry> {
++        self.frame1.get_local_isometry()
++    }
++
++    /// Returns the local [`JointFrame`] of the second body.
++    ///
++    /// If the [`JointAnchor`] is set to [`FromGlobal`](JointAnchor::FromGlobal),
++    /// and the local anchor has not yet been computed, or the [`JointBasis`] is set to
++    /// [`FromGlobal`](JointBasis::FromGlobal), and the local basis has not yet
++    /// been computed, this will return `None`.
++    #[inline]
++    pub fn local_frame2(&self) -> Option<Isometry> {
++        self.frame2.get_local_isometry()
++    }
++
++    /// Returns the local anchor point on the first body.
++    ///
++    /// If the [`JointAnchor`] is set to [`FromGlobal`](JointAnchor::FromGlobal),
++    /// and the local anchor has not yet been computed, this will return `None`.
++    #[inline]
++    pub const fn local_anchor1(&self) -> Option<Vector> {
++        match self.frame1.anchor {
++            JointAnchor::Local(anchor) => Some(anchor),
++            _ => None,
++        }
++    }
++
++    /// Returns the local anchor point on the second body.
++    ///
++    /// If the [`JointAnchor`] is set to [`FromGlobal`](JointAnchor::FromGlobal),
++    /// and the local anchor has not yet been computed, this will return `None`.
++    #[inline]
++    pub const fn local_anchor2(&self) -> Option<Vector> {
++        match self.frame2.anchor {
++            JointAnchor::Local(anchor) => Some(anchor),
++            _ => None,
++        }
++    }
++
++    /// Returns the local basis of the first body.
++    ///
++    /// If the [`JointBasis`] is set to [`FromGlobal`](JointBasis::FromGlobal),
++    /// and the local basis has not yet been computed, this will return `None`.
++    #[inline]
++    pub const fn local_basis1(&self) -> Option<Rot> {
++        match self.frame1.basis {
++            JointBasis::Local(basis) => Some(basis),
++            _ => None,
++        }
++    }
++
++    /// Returns the local basis of the second body.
++    ///
++    /// If the [`JointBasis`] is set to [`FromGlobal`](JointBasis::FromGlobal),
++    /// and the local basis has not yet been computed, this will return `None`.
++    #[inline]
++    pub const fn local_basis2(&self) -> Option<Rot> {
++        match self.frame2.basis {
++            JointBasis::Local(basis) => Some(basis),
++            _ => None,
++        }
++    }
++
++    // --- Motion mode setters ---
++
++    /// Sets the motion mode for translation along the local X axis.
++    #[inline]
++    pub const fn with_linear_x(mut self, motion: JointAxisMotion) -> Self {
++        self.linear_x = motion;
++        self
++    }
++
++    /// Sets the motion mode for translation along the local Y axis.
++    #[inline]
++    pub const fn with_linear_y(mut self, motion: JointAxisMotion) -> Self {
++        self.linear_y = motion;
++        self
++    }
++
++    /// Sets the motion mode for translation along the local Z axis.
++    #[inline]
++    pub const fn with_linear_z(mut self, motion: JointAxisMotion) -> Self {
++        self.linear_z = motion;
++        self
++    }
++
++    /// Sets the motion mode for all linear axes at once.
++    #[inline]
++    pub const fn with_all_linear(mut self, motion: JointAxisMotion) -> Self {
++        self.linear_x = motion;
++        self.linear_y = motion;
++        self.linear_z = motion;
++        self
++    }
++
++    /// Sets the motion mode for twist rotation about the [`twist_axis`](Self::twist_axis).
++    #[inline]
++    pub const fn with_twist(mut self, motion: JointAxisMotion) -> Self {
++        self.twist = motion;
++        self
++    }
++
++    /// Sets the motion mode for swing rotation (axes perpendicular to the [`twist_axis`](Self::twist_axis)).
++    #[inline]
++    pub const fn with_swing(mut self, motion: JointAxisMotion) -> Self {
++        self.swing = motion;
++        self
++    }
++
++    /// Sets the motion mode for all angular axes at once (twist and swing).
++    #[inline]
++    pub const fn with_all_angular(mut self, motion: JointAxisMotion) -> Self {
++        self.twist = motion;
++        self.swing = motion;
++        self
++    }
++
++    // --- Limit setters ---
++
++    /// Sets the translational limits along the local X axis.
++    #[inline]
++    pub const fn with_linear_x_limits(mut self, min: Scalar, max: Scalar) -> Self {
++        self.linear_x_limit = DistanceLimit::new(min, max);
++        self.linear_x = JointAxisMotion::Limited;
++        self
++    }
++
++    /// Sets the translational limits along the local Y axis.
++    #[inline]
++    pub const fn with_linear_y_limits(mut self, min: Scalar, max: Scalar) -> Self {
++        self.linear_y_limit = DistanceLimit::new(min, max);
++        self.linear_y = JointAxisMotion::Limited;
++        self
++    }
++
++    /// Sets the translational limits along the local Z axis.
++    #[inline]
++    pub const fn with_linear_z_limits(mut self, min: Scalar, max: Scalar) -> Self {
++        self.linear_z_limit = DistanceLimit::new(min, max);
++        self.linear_z = JointAxisMotion::Limited;
++        self
++    }
++
++    /// Sets the angular limits for twist rotation about the [`twist_axis`](Self::twist_axis).
++    #[inline]
++    pub const fn with_twist_limits(mut self, min: Scalar, max: Scalar) -> Self {
++        self.twist_limit = AngleLimit::new(min, max);
++        self.twist = JointAxisMotion::Limited;
++        self
++    }
++
++    /// Sets the angular limits for swing rotation (cone half-angle).
++    #[inline]
++    pub const fn with_swing_limits(mut self, min: Scalar, max: Scalar) -> Self {
++        self.swing_limit = AngleLimit::new(min, max);
++        self.swing = JointAxisMotion::Limited;
++        self
++    }
++
++    // --- Compliance setters ---
++
++    /// Sets the compliance of locked linear constraints (inverse of stiffness, m / N).
++    #[inline]
++    pub const fn with_point_compliance(mut self, compliance: Scalar) -> Self {
++        self.point_compliance = compliance;
++        self
++    }
++
++    /// Sets the compliance of limited linear constraints (inverse of stiffness, m / N).
++    #[inline]
++    pub const fn with_linear_limit_compliance(mut self, compliance: Scalar) -> Self {
++        self.linear_limit_compliance = compliance;
++        self
++    }
++
++    /// Sets the compliance of locked angular constraints (inverse of stiffness, N * m / rad).
++    #[inline]
++    pub const fn with_align_compliance(mut self, compliance: Scalar) -> Self {
++        self.align_compliance = compliance;
++        self
++    }
++
++    /// Sets the compliance for the swing limit (inverse of stiffness, N * m / rad).
++    #[inline]
++    pub const fn with_swing_compliance(mut self, compliance: Scalar) -> Self {
++        self.swing_compliance = compliance;
++        self
++    }
++
++    /// Sets the compliance for the twist limit or lock (inverse of stiffness, N * m / rad).
++    #[inline]
++    pub const fn with_twist_compliance(mut self, compliance: Scalar) -> Self {
++        self.twist_compliance = compliance;
++        self
++    }
++}
++
++impl MapEntities for SixDofJoint {
++    fn map_entities<M: EntityMapper>(&mut self, entity_mapper: &mut M) {
++        self.body1 = entity_mapper.get_mapped(self.body1);
++        self.body2 = entity_mapper.get_mapped(self.body2);
++    }
++}
++
++pub(super) fn plugin(app: &mut App) {
++    app.add_systems(
++        PhysicsSchedule,
++        update_local_frames.in_set(JointSystems::PrepareLocalFrames),
++    );
++}
++
++fn update_local_frames(
++    mut joints: Query<&mut SixDofJoint, Changed<SixDofJoint>>,
++    bodies: Query<(&Position, &Rotation)>,
++) {
++    for mut joint in &mut joints {
++        if matches!(joint.frame1.anchor, JointAnchor::Local(_))
++            && matches!(joint.frame2.anchor, JointAnchor::Local(_))
++            && matches!(joint.frame1.basis, JointBasis::Local(_))
++            && matches!(joint.frame2.basis, JointBasis::Local(_))
++        {
++            continue;
++        }
++
++        let Ok([(pos1, rot1), (pos2, rot2)]) = bodies.get_many(joint.entities()) else {
++            continue;
++        };
++
++        let [frame1, frame2] =
++            JointFrame::compute_local(joint.frame1, joint.frame2, pos1.0, pos2.0, rot1, rot2);
++        joint.frame1 = frame1;
++        joint.frame2 = frame2;
++    }
++}
++
++#[cfg(feature = "debug-plugin")]
++impl DebugRenderConstraint<2> for SixDofJoint {
++    type Context = ();
++
++    fn debug_render(
++        &self,
++        positions: [Vector; 2],
++        rotations: [Rotation; 2],
++        _context: &mut Self::Context,
++        gizmos: &mut Gizmos<PhysicsGizmos>,
++        config: &PhysicsGizmos,
++    ) {
++        let [pos1, pos2] = positions;
++        let [rot1, rot2] = rotations;
++
++        let Some(local_anchor1) = self.local_anchor1() else {
++            return;
++        };
++        let Some(local_anchor2) = self.local_anchor2() else {
++            return;
++        };
++
++        let anchor1 = pos1 + rot1 * local_anchor1;
++        let anchor2 = pos2 + rot2 * local_anchor2;
++
++        if let Some(anchor_color) = config.joint_anchor_color {
++            gizmos.draw_line(pos1, anchor1, anchor_color);
++            gizmos.draw_line(pos2, anchor2, anchor_color);
++        }
++
++        if let Some(color) = config.joint_separation_color {
++            gizmos.draw_line(anchor1, anchor2, color);
++        }
++    }
++}
+diff --git a/src/dynamics/mod.rs b/src/dynamics/mod.rs
+index 8a91ff2..301a0fd 100644
+--- a/src/dynamics/mod.rs
++++ b/src/dynamics/mod.rs
+@@ -120,7 +120,7 @@ pub mod prelude {
+     };
+     #[cfg(feature = "3d")]
+     pub use super::{
+-        joints::SphericalJoint,
++        joints::{JointAxisMotion, SixDofJoint, SphericalJoint},
+         rigid_body::forces::{ConstantLocalAngularAcceleration, ConstantLocalTorque},
+     };
+ }
+diff --git a/src/dynamics/solver/mod.rs b/src/dynamics/solver/mod.rs
+index d0fc027..d3e920e 100644
+--- a/src/dynamics/solver/mod.rs
++++ b/src/dynamics/solver/mod.rs
+@@ -74,7 +74,9 @@ impl PluginGroup for SolverPlugins {
+             .add(JointGraphPlugin::<DistanceJoint>::default());
+ 
+         #[cfg(feature = "3d")]
+-        let builder = builder.add(JointGraphPlugin::<SphericalJoint>::default());
++        let builder = builder
++            .add(JointGraphPlugin::<SphericalJoint>::default())
++            .add(JointGraphPlugin::<SixDofJoint>::default());
+ 
+         #[cfg(feature = "xpbd_joints")]
+         let builder = builder.add(XpbdSolverPlugin);
+diff --git a/src/dynamics/solver/plugin.rs b/src/dynamics/solver/plugin.rs
+index 65bd48e..ff36218 100644
+--- a/src/dynamics/solver/plugin.rs
++++ b/src/dynamics/solver/plugin.rs
+@@ -142,6 +142,8 @@ impl Plugin for SolverPlugin {
+                 joint_damping::<RevoluteJoint>,
+                 #[cfg(feature = "3d")]
+                 joint_damping::<SphericalJoint>,
++                #[cfg(feature = "3d")]
++                joint_damping::<SixDofJoint>,
+                 joint_damping::<PrismaticJoint>,
+                 joint_damping::<DistanceJoint>,
+             )
+diff --git a/src/dynamics/solver/xpbd/joints/mod.rs b/src/dynamics/solver/xpbd/joints/mod.rs
+index b3f3835..d769a44 100644
+--- a/src/dynamics/solver/xpbd/joints/mod.rs
++++ b/src/dynamics/solver/xpbd/joints/mod.rs
+@@ -8,6 +8,8 @@ mod fixed;
+ mod prismatic;
+ mod revolute;
+ #[cfg(feature = "3d")]
++mod six_dof;
++#[cfg(feature = "3d")]
+ mod spherical;
+ 
+ pub use distance::DistanceJointSolverData;
+@@ -15,4 +17,6 @@ pub use fixed::FixedJointSolverData;
+ pub use prismatic::PrismaticJointSolverData;
+ pub use revolute::RevoluteJointSolverData;
+ #[cfg(feature = "3d")]
++pub use six_dof::SixDofJointSolverData;
++#[cfg(feature = "3d")]
+ pub use spherical::SphericalJointSolverData;
+diff --git a/src/dynamics/solver/xpbd/joints/six_dof.rs b/src/dynamics/solver/xpbd/joints/six_dof.rs
+new file mode 100644
+index 0000000..39eda46
+--- /dev/null
++++ b/src/dynamics/solver/xpbd/joints/six_dof.rs
+@@ -0,0 +1,457 @@
++use crate::{
++    dynamics::{
++        joints::JointAxisMotion,
++        solver::{
++            solver_body::{SolverBody, SolverBodyInertia},
++            xpbd::*,
++        },
++    },
++    prelude::*,
++};
++use bevy::prelude::*;
++
++/// Constraint data required by the XPBD constraint solver for a [`SixDofJoint`].
++#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Reflect)]
++#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
++#[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
++#[reflect(Component, Debug, PartialEq)]
++pub struct SixDofJointSolverData {
++    // Position constraint data (anchor offsets from center of mass).
++    pub(super) world_r1: Vector,
++    pub(super) world_r2: Vector,
++    pub(super) center_difference: Vector,
++
++    // Linear axes in world space (from body1's joint frame).
++    pub(super) linear_axis_x: Vector,
++    pub(super) linear_axis_y: Vector,
++    pub(super) linear_axis_z: Vector,
++
++    // Angular axes in world space.
++    pub(super) swing_axis1: Vector,
++    pub(super) swing_axis2: Vector,
++    pub(super) twist_axis1: Vector,
++    pub(super) twist_axis2: Vector,
++
++    // Accumulated Lagrange multipliers.
++    pub(super) total_linear_lagrange: Vector,
++    pub(super) total_align_lagrange: Vector,
++    pub(super) total_swing_lagrange: Vector,
++    pub(super) total_twist_lagrange: Vector,
++}
++
++impl XpbdConstraintSolverData for SixDofJointSolverData {
++    fn clear_lagrange_multipliers(&mut self) {
++        self.total_linear_lagrange = Vector::ZERO;
++        self.total_align_lagrange = Vector::ZERO;
++        self.total_swing_lagrange = Vector::ZERO;
++        self.total_twist_lagrange = Vector::ZERO;
++    }
++
++    fn total_position_lagrange(&self) -> Vector {
++        self.total_linear_lagrange
++    }
++
++    fn total_rotation_lagrange(&self) -> AngularVector {
++        self.total_align_lagrange + self.total_swing_lagrange + self.total_twist_lagrange
++    }
++}
++
++impl XpbdConstraint<2> for SixDofJoint {
++    type SolverData = SixDofJointSolverData;
++
++    fn prepare(
++        &mut self,
++        bodies: [&RigidBodyQueryReadOnlyItem; 2],
++        solver_data: &mut SixDofJointSolverData,
++    ) {
++        let [body1, body2] = bodies;
++
++        let Some(local_anchor1) = self.local_anchor1() else {
++            return;
++        };
++        let Some(local_anchor2) = self.local_anchor2() else {
++            return;
++        };
++        let Some(local_basis1) = self.local_basis1() else {
++            return;
++        };
++        let Some(local_basis2) = self.local_basis2() else {
++            return;
++        };
++
++        let rot1_mat = Matrix::from_quat(body1.rotation.0);
++        let rot2_mat = Matrix::from_quat(body2.rotation.0);
++
++        // Compute anchor offsets from center of mass in world space.
++        solver_data.world_r1 = rot1_mat * (local_anchor1 - body1.center_of_mass.0);
++        solver_data.world_r2 = rot2_mat * (local_anchor2 - body2.center_of_mass.0);
++        solver_data.center_difference = (body2.position.0 - body1.position.0)
++            + (body2.rotation * body2.center_of_mass.0 - body1.rotation * body1.center_of_mass.0);
++
++        // Compute world-space linear axes from body1's joint frame.
++        solver_data.linear_axis_x = rot1_mat * (local_basis1 * Vector::X);
++        solver_data.linear_axis_y = rot1_mat * (local_basis1 * Vector::Y);
++        solver_data.linear_axis_z = rot1_mat * (local_basis1 * Vector::Z);
++
++        // Compute world-space angular axes from both bodies' joint frames.
++        let swing_axis = self.twist_axis.any_orthonormal_vector();
++        solver_data.swing_axis1 = rot1_mat * (local_basis1 * swing_axis);
++        solver_data.swing_axis2 = rot2_mat * (local_basis2 * swing_axis);
++        solver_data.twist_axis1 = rot1_mat * (local_basis1 * self.twist_axis);
++        solver_data.twist_axis2 = rot2_mat * (local_basis2 * self.twist_axis);
++    }
++
++    fn solve(
++        &mut self,
++        bodies: [&mut SolverBody; 2],
++        inertias: [&SolverBodyInertia; 2],
++        solver_data: &mut SixDofJointSolverData,
++        dt: Scalar,
++    ) {
++        let [body1, body2] = bodies;
++        let [inertia1, inertia2] = inertias;
++
++        let inv_angular_inertia1 = inertia1.effective_inv_angular_inertia();
++        let inv_angular_inertia2 = inertia2.effective_inv_angular_inertia();
++
++        // --- Angular constraints (solved first, before linear) ---
++
++        // Swing: alignment or limits.
++        match self.swing {
++            JointAxisMotion::Locked => {
++                // Align twist axes (lock both swing DOFs).
++                let a1 = body1.delta_rotation * solver_data.twist_axis1;
++                let a2 = body2.delta_rotation * solver_data.twist_axis2;
++                let difference = a1.cross(a2);
++
++                solver_data.total_align_lagrange += self.align_orientation(
++                    body1,
++                    body2,
++                    inv_angular_inertia1,
++                    inv_angular_inertia2,
++                    difference,
++                    0.0,
++                    self.align_compliance,
++                    dt,
++                );
++            }
++            JointAxisMotion::Limited => {
++                self.apply_swing_limits(body1, body2, inertia1, inertia2, solver_data, dt);
++            }
++            JointAxisMotion::Free => {}
++        }
++
++        // Twist: lock or limits.
++        match self.twist {
++            JointAxisMotion::Locked => {
++                self.apply_twist_constraint(body1, body2, inertia1, inertia2, solver_data, dt);
++            }
++            JointAxisMotion::Limited => {
++                self.apply_twist_limits(body1, body2, inertia1, inertia2, solver_data, dt);
++            }
++            JointAxisMotion::Free => {}
++        }
++
++        // --- Linear constraints ---
++
++        // Compute current separation between anchors.
++        let world_r1 = body1.delta_rotation * solver_data.world_r1;
++        let world_r2 = body2.delta_rotation * solver_data.world_r2;
++        let separation = (body2.delta_position - body1.delta_position)
++            + (world_r2 - world_r1)
++            + solver_data.center_difference;
++
++        // Update linear axes to account for body1's current rotation.
++        let axis_x = body1.delta_rotation * solver_data.linear_axis_x;
++        let axis_y = body1.delta_rotation * solver_data.linear_axis_y;
++        let axis_z = body1.delta_rotation * solver_data.linear_axis_z;
++
++        let locked_compliance = self.point_compliance;
++        let limit_compliance = self.linear_limit_compliance;
++
++        self.solve_linear_axis(
++            body1,
++            body2,
++            inertia1,
++            inertia2,
++            solver_data,
++            separation,
++            world_r1,
++            world_r2,
++            axis_x,
++            self.linear_x,
++            &self.linear_x_limit,
++            if self.linear_x == JointAxisMotion::Locked { locked_compliance } else { limit_compliance },
++            dt,
++        );
++        self.solve_linear_axis(
++            body1,
++            body2,
++            inertia1,
++            inertia2,
++            solver_data,
++            separation,
++            world_r1,
++            world_r2,
++            axis_y,
++            self.linear_y,
++            &self.linear_y_limit,
++            if self.linear_y == JointAxisMotion::Locked { locked_compliance } else { limit_compliance },
++            dt,
++        );
++        self.solve_linear_axis(
++            body1,
++            body2,
++            inertia1,
++            inertia2,
++            solver_data,
++            separation,
++            world_r1,
++            world_r2,
++            axis_z,
++            self.linear_z,
++            &self.linear_z_limit,
++            if self.linear_z == JointAxisMotion::Locked { locked_compliance } else { limit_compliance },
++            dt,
++        );
++    }
++}
++
++impl SixDofJoint {
++    /// Solves a linear constraint along a single axis.
++    ///
++    /// Uses `DistanceLimit::compute_correction_along_axis` to compute a properly-signed
++    /// correction vector, following the same pattern as [`PrismaticJoint`].
++    #[allow(clippy::too_many_arguments)]
++    fn solve_linear_axis(
++        &self,
++        body1: &mut SolverBody,
++        body2: &mut SolverBody,
++        inertia1: &SolverBodyInertia,
++        inertia2: &SolverBodyInertia,
++        solver_data: &mut SixDofJointSolverData,
++        separation: Vector,
++        world_r1: Vector,
++        world_r2: Vector,
++        axis: Vector,
++        motion: JointAxisMotion,
++        limit: &DistanceLimit,
++        compliance: Scalar,
++        dt: Scalar,
++    ) {
++        let correction = match motion {
++            JointAxisMotion::Locked => {
++                DistanceLimit::ZERO.compute_correction_along_axis(separation, axis)
++            }
++            JointAxisMotion::Limited => limit.compute_correction_along_axis(separation, axis),
++            JointAxisMotion::Free => return,
++        };
++
++        let magnitude = correction.length();
++
++        if magnitude <= Scalar::EPSILON {
++            return;
++        }
++
++        let dir = correction / magnitude;
++
++        let inv_mass1 = inertia1.effective_inv_mass();
++        let inv_mass2 = inertia2.effective_inv_mass();
++        let inv_angular_inertia1 = inertia1.effective_inv_angular_inertia();
++        let inv_angular_inertia2 = inertia2.effective_inv_angular_inertia();
++
++        let w1 = PositionConstraint::compute_generalized_inverse_mass(
++            self,
++            inv_mass1.max_element(),
++            inv_angular_inertia1,
++            world_r1,
++            dir,
++        );
++        let w2 = PositionConstraint::compute_generalized_inverse_mass(
++            self,
++            inv_mass2.max_element(),
++            inv_angular_inertia2,
++            world_r2,
++            dir,
++        );
++
++        let delta_lagrange = compute_lagrange_update(0.0, magnitude, &[w1, w2], compliance, dt);
++        let impulse = delta_lagrange * dir;
++
++        solver_data.total_linear_lagrange += impulse;
++
++        self.apply_positional_impulse(
++            body1, body2, inertia1, inertia2, impulse, world_r1, world_r2,
++        );
++    }
++
++    /// Applies swing limit constraints (cone limit around the twist axis).
++    ///
++    /// Uses the same approach as [`SphericalJoint`]: computes the angle between
++    /// the swing axes of both bodies and applies a correction if the limit is violated.
++    fn apply_swing_limits(
++        &self,
++        body1: &mut SolverBody,
++        body2: &mut SolverBody,
++        inertia1: &SolverBodyInertia,
++        inertia2: &SolverBodyInertia,
++        solver_data: &mut SixDofJointSolverData,
++        dt: Scalar,
++    ) {
++        let a1 = body1.delta_rotation * solver_data.swing_axis1;
++        let a2 = body2.delta_rotation * solver_data.swing_axis2;
++
++        let n = a1.cross(a2);
++        let n_magnitude = n.length();
++
++        if n_magnitude <= Scalar::EPSILON {
++            return;
++        }
++
++        let n = n / n_magnitude;
++
++        if let Some(correction) = self.swing_limit.compute_correction(n, a1, a2, PI) {
++            let inv_inertia1 = inertia1.effective_inv_angular_inertia();
++            let inv_inertia2 = inertia2.effective_inv_angular_inertia();
++
++            solver_data.total_swing_lagrange += self.align_orientation(
++                body1,
++                body2,
++                inv_inertia1,
++                inv_inertia2,
++                correction,
++                0.0,
++                self.swing_compliance,
++                dt,
++            );
++        }
++    }
++
++    /// Applies a twist lock constraint, driving twist rotation to zero.
++    ///
++    /// Projects out the swing component and constrains the remaining
++    /// twist angle between the two bodies to be zero.
++    fn apply_twist_constraint(
++        &self,
++        body1: &mut SolverBody,
++        body2: &mut SolverBody,
++        inertia1: &SolverBodyInertia,
++        inertia2: &SolverBodyInertia,
++        solver_data: &mut SixDofJointSolverData,
++        dt: Scalar,
++    ) {
++        // Use the zero-limit approach: apply twist limits with [0, 0].
++        let a1 = body1.delta_rotation * solver_data.swing_axis1;
++        let a2 = body2.delta_rotation * solver_data.swing_axis2;
++
++        let n = a1 + a2;
++        let n_magnitude = n.length();
++
++        if n_magnitude <= Scalar::EPSILON {
++            return;
++        }
++
++        let b1 = body1.delta_rotation * solver_data.twist_axis1;
++        let b2 = body2.delta_rotation * solver_data.twist_axis2;
++
++        let n = n / n_magnitude;
++
++        // Project twist axes onto the plane perpendicular to the average swing axis.
++        let n1 = b1 - n.dot(b1) * n;
++        let n2 = b2 - n.dot(b2) * n;
++        let n1_magnitude = n1.length();
++        let n2_magnitude = n2.length();
++
++        if n1_magnitude <= Scalar::EPSILON || n2_magnitude <= Scalar::EPSILON {
++            return;
++        }
++
++        let n1 = n1 / n1_magnitude;
++        let n2 = n2 / n2_magnitude;
++
++        let max_correction = if a1.dot(a2) > -0.5 { 2.0 * PI } else { dt };
++
++        // Use AngleLimit with [0, 0] to lock twist.
++        let lock_limit = AngleLimit::ZERO;
++        if let Some(correction) = lock_limit.compute_correction(n, n1, n2, max_correction) {
++            let inv_inertia1 = inertia1.effective_inv_angular_inertia();
++            let inv_inertia2 = inertia2.effective_inv_angular_inertia();
++
++            solver_data.total_twist_lagrange += self.align_orientation(
++                body1,
++                body2,
++                inv_inertia1,
++                inv_inertia2,
++                correction,
++                0.0,
++                self.twist_compliance,
++                dt,
++            );
++        }
++    }
++
++    /// Applies twist limit constraints, restricting twist rotation to
++    /// the configured [`twist_limit`](SixDofJoint::twist_limit) range.
++    fn apply_twist_limits(
++        &self,
++        body1: &mut SolverBody,
++        body2: &mut SolverBody,
++        inertia1: &SolverBodyInertia,
++        inertia2: &SolverBodyInertia,
++        solver_data: &mut SixDofJointSolverData,
++        dt: Scalar,
++    ) {
++        let a1 = body1.delta_rotation * solver_data.swing_axis1;
++        let a2 = body2.delta_rotation * solver_data.swing_axis2;
++
++        let n = a1 + a2;
++        let n_magnitude = n.length();
++
++        if n_magnitude <= Scalar::EPSILON {
++            return;
++        }
++
++        let b1 = body1.delta_rotation * solver_data.twist_axis1;
++        let b2 = body2.delta_rotation * solver_data.twist_axis2;
++
++        let n = n / n_magnitude;
++
++        // Project twist axes onto the plane perpendicular to the average swing axis.
++        let n1 = b1 - n.dot(b1) * n;
++        let n2 = b2 - n.dot(b2) * n;
++        let n1_magnitude = n1.length();
++        let n2_magnitude = n2.length();
++
++        if n1_magnitude <= Scalar::EPSILON || n2_magnitude <= Scalar::EPSILON {
++            return;
++        }
++
++        let n1 = n1 / n1_magnitude;
++        let n2 = n2 / n2_magnitude;
++
++        let max_correction = if a1.dot(a2) > -0.5 { 2.0 * PI } else { dt };
++
++        if let Some(correction) =
++            self.twist_limit
++                .compute_correction(n, n1, n2, max_correction)
++        {
++            let inv_inertia1 = inertia1.effective_inv_angular_inertia();
++            let inv_inertia2 = inertia2.effective_inv_angular_inertia();
++
++            solver_data.total_twist_lagrange += self.align_orientation(
++                body1,
++                body2,
++                inv_inertia1,
++                inv_inertia2,
++                correction,
++                0.0,
++                self.twist_compliance,
++                dt,
++            );
++        }
++    }
++}
++
++impl PositionConstraint for SixDofJoint {}
++
++impl AngularConstraint for SixDofJoint {}
+diff --git a/src/dynamics/solver/xpbd/plugin.rs b/src/dynamics/solver/xpbd/plugin.rs
+index ea0f35b..e0463f9 100644
+--- a/src/dynamics/solver/xpbd/plugin.rs
++++ b/src/dynamics/solver/xpbd/plugin.rs
+@@ -24,6 +24,8 @@ impl Plugin for XpbdSolverPlugin {
+         app.register_required_components::<RevoluteJoint, RevoluteJointSolverData>();
+         #[cfg(feature = "3d")]
+         app.register_required_components::<SphericalJoint, SphericalJointSolverData>();
++        #[cfg(feature = "3d")]
++        app.register_required_components::<SixDofJoint, SixDofJointSolverData>();
+         app.register_required_components::<PrismaticJoint, PrismaticJointSolverData>();
+         app.register_required_components::<DistanceJoint, DistanceJointSolverData>();
+ 
+@@ -48,6 +50,8 @@ impl Plugin for XpbdSolverPlugin {
+                 prepare_xpbd_joint::<RevoluteJoint>,
+                 #[cfg(feature = "3d")]
+                 prepare_xpbd_joint::<SphericalJoint>,
++                #[cfg(feature = "3d")]
++                prepare_xpbd_joint::<SixDofJoint>,
+                 prepare_xpbd_joint::<PrismaticJoint>,
+                 prepare_xpbd_joint::<DistanceJoint>,
+             )
+@@ -94,6 +98,8 @@ impl Plugin for XpbdSolverPlugin {
+                 solve_xpbd_joint::<RevoluteJoint>,
+                 #[cfg(feature = "3d")]
+                 solve_xpbd_joint::<SphericalJoint>,
++                #[cfg(feature = "3d")]
++                solve_xpbd_joint::<SixDofJoint>,
+                 solve_xpbd_joint::<PrismaticJoint>,
+                 solve_xpbd_joint::<DistanceJoint>,
+             )
+@@ -117,6 +123,8 @@ impl Plugin for XpbdSolverPlugin {
+                 writeback_joint_forces::<RevoluteJoint>,
+                 #[cfg(feature = "3d")]
+                 writeback_joint_forces::<SphericalJoint>,
++                #[cfg(feature = "3d")]
++                writeback_joint_forces::<SixDofJoint>,
+                 writeback_joint_forces::<PrismaticJoint>,
+                 writeback_joint_forces::<DistanceJoint>,
+             )
+diff --git a/src/lib.rs b/src/lib.rs
+index 4abe69f..1c06654 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -173,6 +173,7 @@
+ //!     - [Prismatic joint](PrismaticJoint)
+ //!     - [Revolute joint](RevoluteJoint)
+ #![cfg_attr(feature = "3d", doc = "    - [Spherical joint](SphericalJoint)")]
++#![cfg_attr(feature = "3d", doc = "    - [Six-DOF joint](SixDofJoint)")]
+ //! - [Temporarily disabling a joint](JointDisabled)
+ #![cfg_attr(
+     feature = "xpbd_joints",

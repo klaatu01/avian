@@ -67,6 +67,7 @@ fn diagnostic_entity_counts(
     distance_joint_query: Query<&DistanceJoint>,
     revolute_joint_query: Query<&RevoluteJoint>,
     #[cfg(feature = "3d")] spherical_joint_query: Query<&SphericalJoint>,
+    #[cfg(feature = "3d")] six_dof_joint_query: Query<&SixDofJoint>,
     mut diagnostics: ResMut<PhysicsEntityDiagnostics>,
 ) {
     diagnostics.dynamic_body_count = rigid_bodies_query
@@ -89,5 +90,6 @@ fn diagnostic_entity_counts(
     #[cfg(feature = "3d")]
     {
         diagnostics.joint_count += spherical_joint_query.iter().count() as u32;
+        diagnostics.joint_count += six_dof_joint_query.iter().count() as u32;
     }
 }

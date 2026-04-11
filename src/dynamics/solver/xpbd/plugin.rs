@@ -24,6 +24,8 @@ impl Plugin for XpbdSolverPlugin {
         app.register_required_components::<RevoluteJoint, RevoluteJointSolverData>();
         #[cfg(feature = "3d")]
         app.register_required_components::<SphericalJoint, SphericalJointSolverData>();
+        #[cfg(feature = "3d")]
+        app.register_required_components::<SixDofJoint, SixDofJointSolverData>();
         app.register_required_components::<PrismaticJoint, PrismaticJointSolverData>();
         app.register_required_components::<DistanceJoint, DistanceJointSolverData>();
 
@@ -48,6 +50,8 @@ impl Plugin for XpbdSolverPlugin {
                 prepare_xpbd_joint::<RevoluteJoint>,
                 #[cfg(feature = "3d")]
                 prepare_xpbd_joint::<SphericalJoint>,
+                #[cfg(feature = "3d")]
+                prepare_xpbd_joint::<SixDofJoint>,
                 prepare_xpbd_joint::<PrismaticJoint>,
                 prepare_xpbd_joint::<DistanceJoint>,
             )
@@ -94,6 +98,8 @@ impl Plugin for XpbdSolverPlugin {
                 solve_xpbd_joint::<RevoluteJoint>,
                 #[cfg(feature = "3d")]
                 solve_xpbd_joint::<SphericalJoint>,
+                #[cfg(feature = "3d")]
+                solve_xpbd_joint::<SixDofJoint>,
                 solve_xpbd_joint::<PrismaticJoint>,
                 solve_xpbd_joint::<DistanceJoint>,
             )
@@ -117,6 +123,8 @@ impl Plugin for XpbdSolverPlugin {
                 writeback_joint_forces::<RevoluteJoint>,
                 #[cfg(feature = "3d")]
                 writeback_joint_forces::<SphericalJoint>,
+                #[cfg(feature = "3d")]
+                writeback_joint_forces::<SixDofJoint>,
                 writeback_joint_forces::<PrismaticJoint>,
                 writeback_joint_forces::<DistanceJoint>,
             )

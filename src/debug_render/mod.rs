@@ -123,6 +123,8 @@ impl Plugin for PhysicsDebugPlugin {
                 debug_render_constraint::<RevoluteJoint, 2>,
                 #[cfg(feature = "3d")]
                 debug_render_constraint::<SphericalJoint, 2>,
+                #[cfg(feature = "3d")]
+                debug_render_constraint::<SixDofJoint, 2>,
                 debug_render_raycasts,
                 #[cfg(all(
                     feature = "default-collider",
