@@ -122,12 +122,34 @@ impl XpbdConstraint<2> for SixDofJoint {
         let [body1, body2] = bodies;
         let [inertia1, inertia2] = inertias;
 
+        // Snapshot pre-solve state for diagnostics.
+        let _b1_pos_pre = body1.delta_position;
+        let _b1_rot_pre = body1.delta_rotation;
+        let _b2_pos_pre = body2.delta_position;
+        let _b2_rot_pre = body2.delta_rotation;
+
         // Angular constraints first (twist, swing1, swing2).
-        for i in 0..3 {
-            if self.angular_motion[i] == JointAxisMotion::Free {
-                continue;
+        // When all 3 are locked, use a combined solve (same as FixedAngleConstraintShared)
+        // to avoid per-axis cross-coupling that causes chain instability.
+        let all_angular_locked = self.angular_motion[0] == JointAxisMotion::Locked
+            && self.angular_motion[1] == JointAxisMotion::Locked
+            && self.angular_motion[2] == JointAxisMotion::Locked;
+
+        if all_angular_locked {
+            solve_angular_combined(body1, body2, inertia1, inertia2, solver_data, dt);
+        } else {
+            // Mixed case: solve locked DOFs via the stable quaternion-error path first,
+            // then limited DOFs via per-axis decomposition.
+            let has_any_locked = self.angular_motion.iter().any(|m| *m == JointAxisMotion::Locked);
+            if has_any_locked {
+                solve_angular_locked_axes(self, body1, body2, inertia1, inertia2, solver_data, dt);
             }
-            solve_angular_dof(self, body1, body2, inertia1, inertia2, solver_data, i, dt);
+            for i in 0..3 {
+                if self.angular_motion[i] != JointAxisMotion::Limited {
+                    continue;
+                }
+                solve_angular_dof(self, body1, body2, inertia1, inertia2, solver_data, i, dt);
+            }
         }
 
         // Angular motors (after constraints so limits take priority).
@@ -138,15 +160,47 @@ impl XpbdConstraint<2> for SixDofJoint {
             solve_angular_motor(self, body1, body2, inertia1, inertia2, solver_data, i, dt);
         }
 
-        // Then linear constraints (X, Y, Z).
-        for i in 0..3 {
-            if self.linear_motion[i] == JointAxisMotion::Free {
-                continue;
+        // Linear constraints.
+        let all_linear_locked = self.linear_motion[0] == JointAxisMotion::Locked
+            && self.linear_motion[1] == JointAxisMotion::Locked
+            && self.linear_motion[2] == JointAxisMotion::Locked;
+
+        if all_linear_locked {
+            solve_linear_combined(body1, body2, inertia1, inertia2, solver_data, dt);
+        } else {
+            for i in 0..3 {
+                if self.linear_motion[i] == JointAxisMotion::Free {
+                    continue;
+                }
+                solve_linear_dof(self, body1, body2, inertia1, inertia2, solver_data, i, dt);
             }
-            solve_linear_dof(self, body1, body2, inertia1, inertia2, solver_data, i, dt);
+        }
+
+        // Post-solve diagnostics: log if any body moved a lot this substep.
+        let b2_pos_delta = (body2.delta_position - _b2_pos_pre).length();
+        let b1_pos_delta = (body1.delta_position - _b1_pos_pre).length();
+        let max_delta = b1_pos_delta.max(b2_pos_delta);
+        if max_delta > 0.05 {
+            // Compute current separation for context.
+            let world_r1 = body1.delta_rotation * solver_data.world_r1;
+            let world_r2 = body2.delta_rotation * solver_data.world_r2;
+            let sep = (body2.delta_position - body1.delta_position)
+                + (world_r2 - world_r1)
+                + solver_data.center_difference;
+            bevy::log::warn!(
+                "D6_STEP b1d={:.4} b2d={:.4} sep=({:.3},{:.3},{:.3}) |sep|={:.4}",
+                b1_pos_delta, b2_pos_delta,
+                sep.x, sep.y, sep.z, sep.length(),
+            );
         }
     }
 }
+
+/// Per-axis sign factor for the angular correction impulse.
+/// The swing-twist-X decomposition has different sign relationships
+/// between measured angle and correction direction for each axis.
+/// swing2 works with `dl * axis`, twist and swing1 need `-dl * axis`.
+const AXIS_SIGN: [Scalar; 3] = [-1.0, -1.0, 1.0];
 
 // --- Helpers ---
 
@@ -190,19 +244,114 @@ fn decompose_swing_twist_x(q: Quaternion) -> (Quaternion, Quaternion) {
 fn extract_angular_coordinates(q_rel: Quaternion) -> [Scalar; 3] {
     let (swing, twist) = decompose_swing_twist_x(q_rel);
 
-    // All angles use the convention: negative = body2 is ahead of body1.
-    // This ensures `dl * axis` (where dl > 0 for negative c) pushes body2 forward.
-    // swing2 naturally gets this sign from `-swung_x.y`; twist and swing1 are negated to match.
-    let twist_angle = wrap_angle(-2.0 * twist.x.atan2(twist.w));
+    // Raw angles from the decomposition. The sign convention is NOT uniform
+    // across axes — each axis has its own relationship between angle sign and
+    // correction direction. The solver accounts for this via AXIS_SIGN.
+    let twist_angle = wrap_angle(2.0 * twist.x.atan2(twist.w));
 
     let swung_x = swing * Vector::X;
-    let swing1 = wrap_angle(-swung_x.z.atan2(swung_x.x));
+    let swing1 = wrap_angle(swung_x.z.atan2(swung_x.x));
     let swing2 = wrap_angle((-swung_x.y).atan2(swung_x.x));
 
     [twist_angle, swing1, swing2]
 }
 
-// --- Angular DOF solver ---
+// --- Combined angular solver (all 3 locked) ---
+
+/// Solves all 3 locked angular axes as a single combined correction.
+/// Uses the same -2*q.xyz() approach as FixedAngleConstraintShared.
+fn solve_angular_combined(
+    body1: &mut SolverBody,
+    body2: &mut SolverBody,
+    inertia1: &SolverBodyInertia,
+    inertia2: &SolverBodyInertia,
+    solver_data: &mut SixDofJointSolverData,
+    dt: Scalar,
+) {
+    let basis1 = current_basis1(body1, solver_data);
+    let basis2 = current_basis2(body2, solver_data);
+    let q_error = basis1 * basis2.inverse();
+    let error = -2.0 * Vector::new(q_error.x, q_error.y, q_error.z);
+
+    let angle = error.length();
+    if angle <= Scalar::EPSILON {
+        return;
+    }
+
+    let axis = error / angle;
+    let inv_i1 = inertia1.effective_inv_angular_inertia();
+    let inv_i2 = inertia2.effective_inv_angular_inertia();
+    let w1 = axis.dot(inv_i1 * axis);
+    let w2 = axis.dot(inv_i2 * axis);
+
+    let dl = compute_lagrange_update(0.0, angle, &[w1, w2], 0.0, dt);
+    let impulse = -dl * axis;
+    solver_data.total_angular_impulse += impulse;
+
+    let dq1 = Quaternion::from_scaled_axis(inv_i1 * impulse);
+    body1.delta_rotation.0 = dq1 * body1.delta_rotation.0;
+    let dq2 = Quaternion::from_scaled_axis(inv_i2 * (-impulse));
+    body2.delta_rotation.0 = dq2 * body2.delta_rotation.0;
+}
+
+/// Solves only the LOCKED angular axes using the stable quaternion-error approach.
+/// Each locked axis gets a scalar constraint from the projected error, applied individually
+/// but using the singularity-free `-2*q.xyz()` error vector.
+#[allow(clippy::too_many_arguments)]
+fn solve_angular_locked_axes(
+    joint: &SixDofJoint,
+    body1: &mut SolverBody,
+    body2: &mut SolverBody,
+    inertia1: &SolverBodyInertia,
+    inertia2: &SolverBodyInertia,
+    solver_data: &mut SixDofJointSolverData,
+    dt: Scalar,
+) {
+    let inv_i1 = inertia1.effective_inv_angular_inertia();
+    let inv_i2 = inertia2.effective_inv_angular_inertia();
+
+    for i in 0..3 {
+        if joint.angular_motion[i] != JointAxisMotion::Locked {
+            continue;
+        }
+
+        // Recompute error each axis (prior correction may have changed orientation).
+        let basis1 = current_basis1(body1, solver_data);
+        let basis2 = current_basis2(body2, solver_data);
+        let q_error = basis1 * basis2.inverse();
+        let error_world = -2.0 * Vector::new(q_error.x, q_error.y, q_error.z);
+        let axis_world = basis_axis(basis1, i);
+        let c = error_world.dot(axis_world);
+
+        if c.abs() <= Scalar::EPSILON {
+            continue;
+        }
+
+        let w1 = axis_world.dot(inv_i1 * axis_world);
+        let w2 = axis_world.dot(inv_i2 * axis_world);
+        let compliance = joint.angular_compliance[i];
+
+        let lambda = &mut solver_data.angular_lock_lambda[i];
+        let dl = compute_lagrange_update(*lambda, c, &[w1, w2], compliance, dt);
+        *lambda += dl;
+
+        apply_angular_impulse_d6(
+            body1, body2, inv_i1, inv_i2,
+            -dl * axis_world,
+            &mut solver_data.total_angular_impulse,
+        );
+    }
+}
+
+// --- Per-axis angular DOF solver ---
+//
+// Uses the quaternion error `-2*q.xyz()` for ALL modes (locked and limited).
+// This avoids the swing-twist decomposition which is unstable in chains
+// due to `atan2` discontinuities and per-axis cross-coupling.
+//
+// For limited axes, the projected quaternion error is used as an approximation
+// of the per-axis angle. This is accurate for small angles (typical limit violations)
+// and degrades gracefully for large angles without singularities.
 
 #[allow(clippy::too_many_arguments)]
 fn solve_angular_dof(
@@ -217,9 +366,12 @@ fn solve_angular_dof(
 ) {
     let basis1 = current_basis1(body1, solver_data);
     let basis2 = current_basis2(body2, solver_data);
-    let q_rel = basis1.inverse() * basis2;
-    let angle = extract_angular_coordinates(q_rel)[axis_index];
     let axis_world = basis_axis(basis1, axis_index);
+
+    // Compute the per-axis error using the stable quaternion approach.
+    let q_error = basis1 * basis2.inverse();
+    let error_world = -2.0 * Vector::new(q_error.x, q_error.y, q_error.z);
+    let angle = error_world.dot(axis_world);
 
     let inv_i1 = inertia1.effective_inv_angular_inertia();
     let inv_i2 = inertia2.effective_inv_angular_inertia();
@@ -227,48 +379,96 @@ fn solve_angular_dof(
     let w2 = axis_world.dot(inv_i2 * axis_world);
     let compliance = joint.angular_compliance[axis_index];
 
-    match joint.angular_motion[axis_index] {
-        JointAxisMotion::Free => {}
-        JointAxisMotion::Locked => {
-            if angle.abs() <= Scalar::EPSILON {
-                return;
-            }
-            let lambda = &mut solver_data.angular_lock_lambda[axis_index];
-            let dl = compute_lagrange_update(*lambda, angle, &[w1, w2], compliance, dt);
-            *lambda += dl;
-            apply_angular_impulse_d6(
-                body1, body2, inv_i1, inv_i2, dl * axis_world,
-                &mut solver_data.total_angular_impulse,
-            );
-        }
+    let c = match joint.angular_motion[axis_index] {
+        JointAxisMotion::Free => return,
+        JointAxisMotion::Locked => angle,
         JointAxisMotion::Limited => {
             let limit = joint.angular_limits[axis_index];
-
-            let c = if angle < limit.min {
+            if angle < limit.min {
                 angle - limit.min
             } else if angle > limit.max {
                 angle - limit.max
             } else {
                 solver_data.angular_lock_lambda[axis_index] = 0.0;
                 return;
-            };
-
-            if c.abs() <= Scalar::EPSILON {
-                return;
             }
-
-            let lambda = &mut solver_data.angular_lock_lambda[axis_index];
-            let dl = compute_lagrange_update(*lambda, c, &[w1, w2], compliance, dt);
-            *lambda += dl;
-            apply_angular_impulse_d6(
-                body1, body2, inv_i1, inv_i2, dl * axis_world,
-                &mut solver_data.total_angular_impulse,
-            );
         }
+    };
+
+    if c.abs() <= Scalar::EPSILON {
+        return;
     }
+
+    let lambda = &mut solver_data.angular_lock_lambda[axis_index];
+    let dl = compute_lagrange_update(*lambda, c, &[w1, w2], compliance, dt);
+    *lambda += dl;
+
+    // The `-2*q.xyz()` convention uses `-dl * axis` for the impulse
+    // (same as FixedAngleConstraintShared's align_orientation).
+    apply_angular_impulse_d6(
+        body1, body2, inv_i1, inv_i2,
+        -dl * axis_world,
+        &mut solver_data.total_angular_impulse,
+    );
 }
 
-// --- Linear DOF solver ---
+// --- Combined linear solver (all 3 locked) ---
+
+/// Solves all 3 locked linear axes as a single point constraint.
+/// Uses the same approach as PointConstraintShared: one impulse along the
+/// full separation direction. Much more stable for chains than per-axis.
+fn solve_linear_combined(
+    body1: &mut SolverBody,
+    body2: &mut SolverBody,
+    inertia1: &SolverBodyInertia,
+    inertia2: &SolverBodyInertia,
+    solver_data: &mut SixDofJointSolverData,
+    dt: Scalar,
+) {
+    let world_r1 = body1.delta_rotation * solver_data.world_r1;
+    let world_r2 = body2.delta_rotation * solver_data.world_r2;
+    let separation = (body2.delta_position - body1.delta_position)
+        + (world_r2 - world_r1)
+        + solver_data.center_difference;
+
+    let magnitude_sq = separation.length_squared();
+    if magnitude_sq <= Scalar::EPSILON {
+        return;
+    }
+
+    let magnitude = magnitude_sq.sqrt();
+    let dir = -separation / magnitude;
+
+    let inv_mass1 = inertia1.effective_inv_mass();
+    let inv_mass2 = inertia2.effective_inv_mass();
+    let inv_ai1 = inertia1.effective_inv_angular_inertia();
+    let inv_ai2 = inertia2.effective_inv_angular_inertia();
+
+    let r1_cross_n = world_r1.cross(dir);
+    let r2_cross_n = world_r2.cross(dir);
+    let w1 = inv_mass1.max_element() + r1_cross_n.dot(inv_ai1 * r1_cross_n);
+    let w2 = inv_mass2.max_element() + r2_cross_n.dot(inv_ai2 * r2_cross_n);
+
+    let dl = compute_lagrange_update(0.0, magnitude, &[w1, w2], 0.0, dt);
+    let impulse = dl * dir;
+
+    if magnitude > 0.05 {
+        bevy::log::warn!(
+            "LIN_COMB |sep|={:.4} dl={:.6} w=({:.2},{:.2}) |imp|={:.4}",
+            magnitude, dl, w1, w2, impulse.length(),
+        );
+    }
+
+    solver_data.total_linear_impulse += impulse;
+
+    apply_positional_impulse_d6(
+        body1, body2, inv_mass1, inv_mass2, inv_ai1, inv_ai2,
+        impulse, world_r1, world_r2,
+        &mut solver_data.total_linear_impulse,
+    );
+}
+
+// --- Per-axis linear DOF solver ---
 
 #[allow(clippy::too_many_arguments)]
 fn solve_linear_dof(

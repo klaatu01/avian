@@ -182,6 +182,10 @@ name = "six_dof_door_3d"
 required-features = ["3d", "default-collider", "debug-plugin"]
 
 [[example]]
+name = "six_dof_ragdoll_3d"
+required-features = ["3d", "default-collider", "debug-plugin"]
+
+[[example]]
 name = "prismatic_joint_3d"
 required-features = ["3d", "default-collider"]
 
