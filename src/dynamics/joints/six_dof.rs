@@ -92,6 +92,10 @@ pub struct SixDofJoint {
     pub linear_compliance: [Scalar; 3],
     /// Compliance for twist, swing1, swing2.
     pub angular_compliance: [Scalar; 3],
+
+    /// Angular motors for twist, swing1, swing2.
+    /// Each motor can independently drive its axis toward a target position/velocity.
+    pub angular_motors: [AngularMotor; 3],
 }
 
 impl EntityConstraint<2> for SixDofJoint {
@@ -131,6 +135,11 @@ impl SixDofJoint {
             angular_limits: [AngleLimit::ZERO; 3],
             linear_compliance: [0.0; 3],
             angular_compliance: [0.0; 3],
+            angular_motors: [
+                AngularMotor::new_disabled(MotorModel::DEFAULT),
+                AngularMotor::new_disabled(MotorModel::DEFAULT),
+                AngularMotor::new_disabled(MotorModel::DEFAULT),
+            ],
         }
     }
 
@@ -444,6 +453,24 @@ impl SixDofJoint {
     #[inline]
     pub const fn with_all_angular_compliance(mut self, compliance: Scalar) -> Self {
         self.angular_compliance = [compliance; 3];
+        self
+    }
+
+    // --- Motor builders ---
+
+    /// Sets the angular motor for a specific axis (Twist, Swing1, or Swing2).
+    #[inline]
+    pub fn with_angular_motor(mut self, axis: SixDofAxis, motor: AngularMotor) -> Self {
+        if let Some(i) = Self::angular_index(axis) {
+            self.angular_motors[i] = motor;
+        }
+        self
+    }
+
+    /// Sets the same angular motor for all three angular axes.
+    #[inline]
+    pub fn with_all_angular_motors(mut self, motor: AngularMotor) -> Self {
+        self.angular_motors = [motor; 3];
         self
     }
 }

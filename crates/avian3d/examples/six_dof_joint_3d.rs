@@ -3,7 +3,7 @@
 //! The scene shows four joints:
 //! 1. All axes locked (equivalent to a FixedJoint) — top left
 //! 2. All angular free (equivalent to a SphericalJoint) — top right
-//! 3. Limited twist about X, swing locked (like a RevoluteJoint with limits) — bottom left
+//! 3. Limited twist about X (like a RevoluteJoint with limits) — bottom left
 //! 4. Linear Y limited, others locked (like a PrismaticJoint along Y) — bottom right
 
 use avian3d::{math::*, prelude::*};
@@ -122,19 +122,19 @@ fn setup(
             .spawn((
                 Mesh3d(cube_mesh.clone()),
                 MeshMaterial3d(limited_material.clone()),
-                Transform::from_translation((pos + Vector::new(0.0, 0.0, 2.0)).f32()),
+                Transform::from_translation((pos + Vector::new(0.0, 0.0, 1.5)).f32()),
                 RigidBody::Dynamic,
                 MassPropertiesBundle::from_shape(&Cuboid::from_length(1.0), 1.0),
+                AngularVelocity(Vector::X * 10.0),
             ))
             .id();
 
         // Twist about local X is limited to ±45°.
-        // The body's center of mass is offset from the pivot along world Z,
-        // so gravity produces torque around world X and the body swings
-        // within the twist limits.
+        // The body's center of mass is 1.5 units from the pivot along Z.
+        // Initial angular velocity about X makes the twist limit behavior visible.
         commands.spawn(
             SixDofJoint::new(anchor, body)
-                .with_local_anchor2(Vector::new(0.0, 0.0, -2.0))
+                .with_local_anchor2(Vector::new(0.0, 0.0, -1.5))
                 .with_twist_limits(-PI / 4.0, PI / 4.0),
         );
     }
@@ -159,6 +159,7 @@ fn setup(
                 Transform::from_translation((pos + Vector::new(0.0, -1.5, 0.0)).f32()),
                 RigidBody::Dynamic,
                 MassPropertiesBundle::from_shape(&Cuboid::from_length(1.0), 1.0),
+                LinearVelocity(Vector::new(0.0, -8.0, 0.0)),
             ))
             .id();
 
