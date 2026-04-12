@@ -2,6 +2,7 @@
 //!
 //! The pelvis starts kinematic — use Arrow Keys / WASD to move it.
 //! Press Space to launch upward. Press R to release as dynamic (ragdoll mode).
+//! Press M to toggle motors that drive the ragdoll into a T-pose.
 
 use avian3d::{math::*, prelude::*};
 use bevy::prelude::*;
@@ -18,7 +19,7 @@ fn main() {
         .insert_resource(SubstepCount(12))
         .insert_resource(Gravity(Vector::NEG_Y * 9.81))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_pelvis, release_pelvis))
+        .add_systems(Update, (move_pelvis, release_pelvis, toggle_motors))
         .run();
 }
 
@@ -355,6 +356,33 @@ fn move_pelvis(
         }
 
         vel.0 *= 0.92;
+    }
+}
+
+/// Press M to toggle angular motors on all SixDofJoints.
+/// Motors drive all axes to target_position=0 (T-pose rest position).
+fn toggle_motors(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut joints: Query<&mut SixDofJoint>,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyM) {
+        return;
+    }
+
+    let motor_on = AngularMotor::new(MotorModel::SpringDamper {
+        frequency: 3.0,
+        damping_ratio: 0.8,
+    })
+    .with_target_position(0.0)
+    .with_max_torque(50.0);
+
+    let motor_off = AngularMotor::new_disabled(MotorModel::DEFAULT);
+
+    for mut joint in &mut joints {
+        // Toggle: if twist motor is enabled, turn all off; otherwise turn all on.
+        let currently_on = joint.angular_motors[SixDofJoint::TWIST].enabled;
+        let motor = if currently_on { motor_off } else { motor_on };
+        joint.angular_motors = [motor; 3];
     }
 }
 

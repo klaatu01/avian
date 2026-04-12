@@ -122,12 +122,6 @@ impl XpbdConstraint<2> for SixDofJoint {
         let [body1, body2] = bodies;
         let [inertia1, inertia2] = inertias;
 
-        // Snapshot pre-solve state for diagnostics.
-        let _b1_pos_pre = body1.delta_position;
-        let _b1_rot_pre = body1.delta_rotation;
-        let _b2_pos_pre = body2.delta_position;
-        let _b2_rot_pre = body2.delta_rotation;
-
         // Angular constraints first (twist, swing1, swing2).
         // When all 3 are locked, use a combined solve (same as FixedAngleConstraintShared)
         // to avoid per-axis cross-coupling that causes chain instability.
@@ -176,31 +170,8 @@ impl XpbdConstraint<2> for SixDofJoint {
             }
         }
 
-        // Post-solve diagnostics: log if any body moved a lot this substep.
-        let b2_pos_delta = (body2.delta_position - _b2_pos_pre).length();
-        let b1_pos_delta = (body1.delta_position - _b1_pos_pre).length();
-        let max_delta = b1_pos_delta.max(b2_pos_delta);
-        if max_delta > 0.05 {
-            // Compute current separation for context.
-            let world_r1 = body1.delta_rotation * solver_data.world_r1;
-            let world_r2 = body2.delta_rotation * solver_data.world_r2;
-            let sep = (body2.delta_position - body1.delta_position)
-                + (world_r2 - world_r1)
-                + solver_data.center_difference;
-            bevy::log::warn!(
-                "D6_STEP b1d={:.4} b2d={:.4} sep=({:.3},{:.3},{:.3}) |sep|={:.4}",
-                b1_pos_delta, b2_pos_delta,
-                sep.x, sep.y, sep.z, sep.length(),
-            );
-        }
     }
 }
-
-/// Per-axis sign factor for the angular correction impulse.
-/// The swing-twist-X decomposition has different sign relationships
-/// between measured angle and correction direction for each axis.
-/// swing2 works with `dl * axis`, twist and swing1 need `-dl * axis`.
-const AXIS_SIGN: [Scalar; 3] = [-1.0, -1.0, 1.0];
 
 // --- Helpers ---
 
@@ -220,41 +191,6 @@ fn basis_axis(basis: Quaternion, index: usize) -> Vector {
     }
 }
 
-fn wrap_angle(mut angle: Scalar) -> Scalar {
-    while angle > PI {
-        angle -= TAU;
-    }
-    while angle < -PI {
-        angle += TAU;
-    }
-    angle
-}
-
-fn decompose_swing_twist_x(q: Quaternion) -> (Quaternion, Quaternion) {
-    let twist = Quaternion::from_xyzw(q.x, 0.0, 0.0, q.w);
-    let twist = if twist.length_squared() > Scalar::EPSILON {
-        twist.normalize()
-    } else {
-        Quaternion::IDENTITY
-    };
-    let swing = q * twist.inverse();
-    (swing, twist)
-}
-
-fn extract_angular_coordinates(q_rel: Quaternion) -> [Scalar; 3] {
-    let (swing, twist) = decompose_swing_twist_x(q_rel);
-
-    // Raw angles from the decomposition. The sign convention is NOT uniform
-    // across axes — each axis has its own relationship between angle sign and
-    // correction direction. The solver accounts for this via AXIS_SIGN.
-    let twist_angle = wrap_angle(2.0 * twist.x.atan2(twist.w));
-
-    let swung_x = swing * Vector::X;
-    let swing1 = wrap_angle(swung_x.z.atan2(swung_x.x));
-    let swing2 = wrap_angle((-swung_x.y).atan2(swung_x.x));
-
-    [twist_angle, swing1, swing2]
-}
 
 // --- Combined angular solver (all 3 locked) ---
 
@@ -451,14 +387,6 @@ fn solve_linear_combined(
 
     let dl = compute_lagrange_update(0.0, magnitude, &[w1, w2], 0.0, dt);
     let impulse = dl * dir;
-
-    if magnitude > 0.05 {
-        bevy::log::warn!(
-            "LIN_COMB |sep|={:.4} dl={:.6} w=({:.2},{:.2}) |imp|={:.4}",
-            magnitude, dl, w1, w2, impulse.length(),
-        );
-    }
-
     solver_data.total_linear_impulse += impulse;
 
     apply_positional_impulse_d6(
@@ -618,9 +546,12 @@ fn solve_angular_motor(
 
     let basis1 = current_basis1(body1, solver_data);
     let basis2 = current_basis2(body2, solver_data);
-    let q_rel = basis1.inverse() * basis2;
-    let current_angle = extract_angular_coordinates(q_rel)[axis_index];
     let axis_world = basis_axis(basis1, axis_index);
+
+    // Use the same quaternion-error angle as the constraint solver.
+    let q_error = basis1 * basis2.inverse();
+    let error_world = -2.0 * Vector::new(q_error.x, q_error.y, q_error.z);
+    let current_angle = error_world.dot(axis_world);
 
     let inv_i1 = inertia1.effective_inv_angular_inertia();
     let inv_i2 = inertia2.effective_inv_angular_inertia();
@@ -636,10 +567,7 @@ fn solve_angular_motor(
         (body2.angular_velocity - body1.angular_velocity).dot(axis_world);
 
     let velocity_error = motor.target_velocity - relative_angular_velocity;
-
-    // Wrap position error to [-PI, PI] for shortest path rotation.
-    let raw_error = motor.target_position - current_angle;
-    let position_error = (raw_error + PI).rem_euclid(TAU) - PI;
+    let position_error = motor.target_position - current_angle;
 
     let Some(delta_lagrange) =
         compute_angular_motor_lagrange(velocity_error, position_error, w_sum, motor, dt)
@@ -649,12 +577,13 @@ fn solve_angular_motor(
 
     solver_data.angular_motor_lagrange[axis_index] += delta_lagrange;
 
+    // Same sign convention as constraints: -dl * axis for the quaternion error.
     apply_angular_impulse_d6(
         body1,
         body2,
         inv_i1,
         inv_i2,
-        delta_lagrange * axis_world,
+        -delta_lagrange * axis_world,
         &mut solver_data.total_angular_impulse,
     );
 }
