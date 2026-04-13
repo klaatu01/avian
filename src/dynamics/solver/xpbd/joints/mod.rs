@@ -19,4 +19,6 @@ pub use revolute::RevoluteJointSolverData;
 #[cfg(feature = "3d")]
 pub use six_dof::SixDofJointSolverData;
 #[cfg(feature = "3d")]
+pub(crate) use six_dof::snapshot_six_dof_pre_solve_rotations;
+#[cfg(feature = "3d")]
 pub use spherical::SphericalJointSolverData;

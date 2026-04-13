@@ -99,6 +99,8 @@ impl Plugin for XpbdSolverPlugin {
                 #[cfg(feature = "3d")]
                 solve_xpbd_joint::<SphericalJoint>,
                 #[cfg(feature = "3d")]
+                snapshot_six_dof_pre_solve_rotations,
+                #[cfg(feature = "3d")]
                 solve_xpbd_joint::<SixDofJoint>,
                 solve_xpbd_joint::<PrismaticJoint>,
                 solve_xpbd_joint::<DistanceJoint>,

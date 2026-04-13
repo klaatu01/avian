@@ -1,6 +1,6 @@
 use crate::{
     dynamics::{
-        joints::JointAxisMotion,
+        joints::{EntityConstraint, JointAxisMotion},
         solver::{
             solver_body::{SolverBody, SolverBodyInertia},
             xpbd::*,
@@ -53,6 +53,18 @@ pub struct SixDofJointSolverData {
     /// Total impulses for force/torque readback.
     pub(super) total_linear_impulse: Vector,
     pub(super) total_angular_impulse: Vector,
+
+    /// Pre-solve `delta_rotation` of body1/body2, snapshotted at the start
+    /// of every substep (before any joint solves run). The motor solver
+    /// uses these to derive a "live" intra-substep angular velocity
+    ///
+    ///     live_ω = body.angular_velocity + 2 * (delta_rot * pre⁻¹).xyz / dt
+    ///
+    /// so that when adjacent motorized joints share a body, the second
+    /// joint's motor sees ω that reflects the first joint's in-substep
+    /// corrections, instead of a stale start-of-substep snapshot.
+    pub(super) pre_solve_delta_rotation_1: Quaternion,
+    pub(super) pre_solve_delta_rotation_2: Quaternion,
 }
 
 impl XpbdConstraintSolverData for SixDofJointSolverData {
@@ -529,6 +541,74 @@ fn apply_positional_impulse_d6(
     body2.delta_rotation.0 = dq2 * body2.delta_rotation.0;
 }
 
+/// Wraps an angle (radians) to `[-PI, PI]`.
+#[inline]
+fn wrap_to_pi(a: Scalar) -> Scalar {
+    (a + PI).rem_euclid(TAU) - PI
+}
+
+/// Computes an effective "live" angular velocity for a body during the
+/// joint solve, by adding the in-substep contribution of `delta_rotation`
+/// (post-snapshot) onto the start-of-substep `angular_velocity`. Used by
+/// the motor solver so that joint B sees joint A's in-substep corrections
+/// when A and B share a body, instead of a stale ω.
+///
+/// `delta_rotation` is the body's current cumulative solver delta, and
+/// `pre_solve` is the snapshot of that same field taken by the global
+/// pre-solve system at the very start of this substep. Their ratio is the
+/// rotation applied during this substep's solve phase so far.
+#[inline]
+fn live_angular_velocity(
+    angular_velocity: Vector,
+    delta_rotation: Quaternion,
+    pre_solve: Quaternion,
+    substep_dt: Scalar,
+) -> Vector {
+    let in_substep = delta_rotation * pre_solve.inverse();
+    let mut w = 2.0 * Vector::new(in_substep.x, in_substep.y, in_substep.z) / substep_dt;
+    if in_substep.w < 0.0 {
+        w = -w;
+    }
+    angular_velocity + w
+}
+
+/// Decomposes a relative quaternion into `[twist, swing1, swing2]` angles
+/// in true radians, following the right-hand rule for each axis:
+///
+/// - `twist` = rotation about local X
+/// - `swing1` = rotation about local Y
+/// - `swing2` = rotation about local Z
+///
+/// Used by the motor solver — the constraint and limit solvers use the
+/// projected `-2*q.xyz()` approach instead because it has no singularities
+/// and is numerically more stable in chains. Motors need true radians to
+/// match the user-facing `target_position` semantics.
+///
+/// Near-π swing singularities exist but don't affect typical ragdoll joints.
+fn decompose_twist_swing_angles(q: Quaternion) -> [Scalar; 3] {
+    // Twist: project q onto the X axis.
+    let twist_q = Quaternion::from_xyzw(q.x, 0.0, 0.0, q.w);
+    let twist_q = if twist_q.length_squared() > Scalar::EPSILON {
+        twist_q.normalize()
+    } else {
+        Quaternion::IDENTITY
+    };
+    let twist_angle = 2.0 * twist_q.x.atan2(twist_q.w);
+
+    // Swing: everything that isn't twist.
+    let swing_q = q * twist_q.inverse();
+    let swung_x = swing_q * Vector::X;
+
+    // For a rotation `+θ` about Y, glam rotates +X to (cos θ, 0, -sin θ),
+    // so `-z` gives the positive-sense angle.
+    let swing1 = (-swung_x.z).atan2(swung_x.x);
+    // For a rotation `+θ` about Z, glam rotates +X to (cos θ, sin θ, 0),
+    // so `+y` gives the positive-sense angle.
+    let swing2 = swung_x.y.atan2(swung_x.x);
+
+    [twist_angle, swing1, swing2]
+}
+
 // --- Angular motor solver ---
 
 #[allow(clippy::too_many_arguments)]
@@ -546,28 +626,79 @@ fn solve_angular_motor(
 
     let basis1 = current_basis1(body1, solver_data);
     let basis2 = current_basis2(body2, solver_data);
-    let axis_world = basis_axis(basis1, axis_index);
 
-    // Use the same quaternion-error angle as the constraint solver.
-    let q_error = basis1 * basis2.inverse();
-    let error_world = -2.0 * Vector::new(q_error.x, q_error.y, q_error.z);
-    let current_angle = error_world.dot(axis_world);
+    // The motor's scalar DOF is one coordinate of the nonlinear twist/swing
+    // decomposition of `q_rel = basis1.inverse() * basis2`. The naive "axis_world
+    // = basis1 * X/Y/Z" direction is only the conjugate of that coordinate at the
+    // reference pose. Away from it, the conjugate direction is the gradient
+    //
+    //     grad_i = d(decompose[i]) / d(ω_rel_in_basis1_frame),
+    //
+    // computed here by a 3-point forward difference. We then rotate grad_i to
+    // world and use it as the effective joint axis for *everything*: effective
+    // mass (w1/w2), velocity projection, and the correction impulse direction.
+    // Using `axis_world` for those when `current_angle` lives in decomposed
+    // coordinates was creating an indefinite feedback loop on shared-body chains
+    // (spine_01 + spine_02 pump).
+    let q_rel = basis1.inverse() * basis2;
+    let current_angles = decompose_twist_swing_angles(q_rel);
+    let current_angle = current_angles[axis_index];
+
+    // Numerical Jacobian: dq_rel/dt = 0.5 * ω_rel_in_basis1 * q_rel (left multiply).
+    const GRAD_EPS: Scalar = 1e-4;
+    let mut grad_local = Vector::ZERO;
+    for k in 0..3 {
+        let probe_axis = match k {
+            0 => Vector::X,
+            1 => Vector::Y,
+            _ => Vector::Z,
+        };
+        let dq = Quaternion::from_scaled_axis(probe_axis * GRAD_EPS);
+        let q_probe = dq * q_rel;
+        let a_probe = decompose_twist_swing_angles(q_probe)[axis_index];
+        grad_local[k] = wrap_to_pi(a_probe - current_angle) / GRAD_EPS;
+    }
+    let grad_world = basis1 * grad_local;
+    let grad_len_sq = grad_world.length_squared();
+    if grad_len_sq <= Scalar::EPSILON {
+        // Decomposition is locally degenerate (near a swing singularity).
+        return;
+    }
 
     let inv_i1 = inertia1.effective_inv_angular_inertia();
     let inv_i2 = inertia2.effective_inv_angular_inertia();
-    let w1 = axis_world.dot(inv_i1 * axis_world);
-    let w2 = axis_world.dot(inv_i2 * axis_world);
+    let w1 = grad_world.dot(inv_i1 * grad_world);
+    let w2 = grad_world.dot(inv_i2 * grad_world);
     let w_sum = w1 + w2;
 
     if w_sum <= Scalar::EPSILON {
         return;
     }
 
-    let relative_angular_velocity =
-        (body2.angular_velocity - body1.angular_velocity).dot(axis_world);
+    // Use "live" intra-substep angular velocities rather than the stale
+    // start-of-substep snapshot. When two motorized joints share a body,
+    // the second joint's ω read needs to include the first joint's
+    // in-substep corrections; otherwise there's a per-substep phase lag
+    // that integrates into slow chain drift.
+    let live_omega_1 = live_angular_velocity(
+        body1.angular_velocity,
+        body1.delta_rotation.0,
+        solver_data.pre_solve_delta_rotation_1,
+        dt,
+    );
+    let live_omega_2 = live_angular_velocity(
+        body2.angular_velocity,
+        body2.delta_rotation.0,
+        solver_data.pre_solve_delta_rotation_2,
+        dt,
+    );
+    // d(decompose[i])/dt expressed in the same coordinate as position_error.
+    let measured_rate = (live_omega_2 - live_omega_1).dot(grad_world);
+    let velocity_error = motor.target_velocity - measured_rate;
 
-    let velocity_error = motor.target_velocity - relative_angular_velocity;
-    let position_error = motor.target_position - current_angle;
+    // Both `current_angle` and `target_position` are in real radians.
+    // Wrap the error to [-π, π] for shortest-path rotation.
+    let position_error = wrap_to_pi(motor.target_position - current_angle);
 
     let Some(delta_lagrange) =
         compute_angular_motor_lagrange(velocity_error, position_error, w_sum, motor, dt)
@@ -577,13 +708,13 @@ fn solve_angular_motor(
 
     solver_data.angular_motor_lagrange[axis_index] += delta_lagrange;
 
-    // Same sign convention as constraints: -dl * axis for the quaternion error.
+    // Correction along the conjugate direction of the scalar DOF, not basis1 * e_i.
     apply_angular_impulse_d6(
         body1,
         body2,
         inv_i1,
         inv_i2,
-        -delta_lagrange * axis_world,
+        -delta_lagrange * grad_world,
         &mut solver_data.total_angular_impulse,
     );
 }
@@ -636,3 +767,28 @@ fn compute_angular_motor_lagrange(
 impl PositionConstraint for SixDofJoint {}
 
 impl AngularConstraint for SixDofJoint {}
+
+/// Copies each [`SixDofJoint`]'s two bodies' [`PreSolveDeltaRotation`] into
+/// the joint's [`SixDofJointSolverData`] at the start of every substep,
+/// before the joint solve phase runs. The motor solver uses these to
+/// derive a "live" intra-substep angular velocity — see
+/// `solve_angular_motor`.
+pub(crate) fn snapshot_six_dof_pre_solve_rotations(
+    bodies: Query<&PreSolveDeltaRotation, Without<RigidBodyDisabled>>,
+    mut joints: Query<
+        (&SixDofJoint, &mut SixDofJointSolverData),
+        (Without<RigidBody>, Without<JointDisabled>),
+    >,
+) {
+    for (joint, mut solver_data) in &mut joints {
+        let [e1, e2] = joint.entities();
+        solver_data.pre_solve_delta_rotation_1 = bodies
+            .get(e1)
+            .map(|pre| pre.0 .0)
+            .unwrap_or(Quaternion::IDENTITY);
+        solver_data.pre_solve_delta_rotation_2 = bodies
+            .get(e2)
+            .map(|pre| pre.0 .0)
+            .unwrap_or(Quaternion::IDENTITY);
+    }
+}
