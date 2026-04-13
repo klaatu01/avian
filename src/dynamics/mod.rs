@@ -120,7 +120,7 @@ pub mod prelude {
     };
     #[cfg(feature = "3d")]
     pub use super::{
-        joints::SphericalJoint,
+        joints::{JointAxisMotion, SixDofAxis, SixDofJoint, SphericalJoint},
         rigid_body::forces::{ConstantLocalAngularAcceleration, ConstantLocalTorque},
     };
 }

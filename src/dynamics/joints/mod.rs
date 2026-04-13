@@ -33,6 +33,10 @@ Therefore, they have 3 translational DOF and 3 rotational DOF, a total of 6 DOF.
     feature = "3d",
     doc = "| [`SphericalJoint`] | -                         | 3 Rotations                 |"
 )]
+#![cfg_attr(
+    feature = "3d",
+    doc = "| [`SixDofJoint`]    | -                         | Configurable (0-6 DOF)      |"
+)]
 //!
 //! # Using Joints
 //!
@@ -218,6 +222,8 @@ mod motor;
 mod prismatic;
 mod revolute;
 #[cfg(feature = "3d")]
+mod six_dof;
+#[cfg(feature = "3d")]
 mod spherical;
 #[cfg(test)]
 mod tests;
@@ -227,6 +233,8 @@ pub use fixed::FixedJoint;
 pub use motor::{AngularMotor, LinearMotor, MotorModel};
 pub use prismatic::PrismaticJoint;
 pub use revolute::RevoluteJoint;
+#[cfg(feature = "3d")]
+pub use six_dof::{JointAxisMotion, SixDofAxis, SixDofJoint};
 #[cfg(feature = "3d")]
 pub use spherical::SphericalJoint;
 
@@ -249,6 +257,8 @@ impl Plugin for JointPlugin {
             distance::plugin,
             prismatic::plugin,
             revolute::plugin,
+            #[cfg(feature = "3d")]
+            six_dof::plugin,
             #[cfg(feature = "3d")]
             spherical::plugin,
         ));

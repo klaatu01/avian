@@ -74,7 +74,9 @@ impl PluginGroup for SolverPlugins {
             .add(JointGraphPlugin::<DistanceJoint>::default());
 
         #[cfg(feature = "3d")]
-        let builder = builder.add(JointGraphPlugin::<SphericalJoint>::default());
+        let builder = builder
+            .add(JointGraphPlugin::<SphericalJoint>::default())
+            .add(JointGraphPlugin::<SixDofJoint>::default());
 
         #[cfg(feature = "xpbd_joints")]
         let builder = builder.add(XpbdSolverPlugin);
